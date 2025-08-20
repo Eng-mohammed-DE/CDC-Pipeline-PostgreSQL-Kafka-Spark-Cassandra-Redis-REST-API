@@ -1,0 +1,86 @@
+# ---------------------------
+# Batch-level error handling in foreachBatch
+# ---------------------------
+def process_enrich_and_write(batch_df, batch_id):
+    if batch_df.rdd.isEmpty():
+        return
+    try:  # ← Catch errors at the batch level to prevent Spark streaming crash
+        # Join with PostgreSQL content lengths
+        enriched_df = batch_df.join(content_df, on="content_id", how="left")
+        rows = enriched_df.collect()
+        logger.info("Processing batch id=%s rows=%d", batch_id, len(rows))
+
+        for r in rows:
+            event_pk = r.id if r.id is not None else int(time.time() * 1000)
+
+            # ---------------------------
+            # Engagement % computation
+            # ---------------------------
+            engagement_pct = None
+            try:  # ← Per-event error handling for engagement percentage computation
+                if r.duration_ms is not None and r.length_seconds:
+                    engagement_seconds = Decimal(r.duration_ms) / Decimal(1000)
+                    engagement_pct = float(
+                        (engagement_seconds / Decimal(r.length_seconds)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    )
+            except Exception:
+                logger.exception("Error computing engagement_pct")
+                #  If computation fails, engagement_pct remains None
+
+            # ---------------------------
+            # Cassandra write
+            # ---------------------------
+            try:  # ← Handle errors when writing to Cassandra
+                cass.write_event(event_pk, r.content_id, r.user_id, r.event_type, r.event_ts,
+                                 r.duration_ms, r.device, engagement_pct)
+            except Exception:
+                logger.exception("Cassandra write failed")
+                #  Optionally, failed events can be written to a Cassandra DLQ table
+
+            # ---------------------------
+            # Redis updates
+            # ---------------------------
+            try:  # ← Handle errors during Redis updates
+                if r.content_id:
+                    redis_client.zincrby("engagement_realtime_counts", 1, r.content_id)
+                    if engagement_pct is not None:
+                        redis_client.hincrbyfloat("engagement_pct_sum", r.content_id, engagement_pct)
+                        redis_client.hincrby("engagement_pct_count", r.content_id, 1)
+                        sum_val = float(redis_client.hget("engagement_pct_sum", r.content_id) or 0)
+                        cnt_val = int(redis_client.hget("engagement_pct_count", r.content_id) or 0)
+                        if cnt_val > 0:
+                            redis_client.zadd("engagement_realtime_avg_pct", {r.content_id: sum_val / cnt_val})
+            except Exception:
+                logger.exception("Redis update failed")
+                #  Failure on one content_id does not block other events
+
+            # ---------------------------
+            # REST API Call
+            # ---------------------------
+            event_dict = {
+                "id": event_pk,
+                "content_id": r.content_id,
+                "user_id": r.user_id,
+                "event_type": r.event_type,
+                "event_ts": str(r.event_ts) if r.event_ts else None,
+                "duration_ms": r.duration_ms,
+                "device": r.device,
+                "engagement_pct": engagement_pct
+            }
+            send_to_rest_with_dlq(event_dict)  # This function already includes try-except and DLQ logic
+
+    except Exception:
+        logger.exception("Batch processing failed")  # ⚠️ Protects the entire batch from crashing Spark
+
+# ---------------------------
+# Windowed Aggregation → Redis
+# ---------------------------
+def write_agg_to_redis(batch_df, batch_id):
+    rows = batch_df.collect()
+    for r in rows:
+        if r.content_id:
+            try:  # ← Handle errors when writing aggregated counts to Redis
+                redis_client.zadd("engagement_10m", {r.content_id: int(r.event_count or 0)})
+            except Exception:
+                logger.exception("Failed to write aggregation to Redis")
+                #  Failure for one content_id does not stop processing other rows
