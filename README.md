@@ -11,7 +11,7 @@ This project demonstrates a **Change Data Capture (CDC) pipeline** where:
 
 ---
 
-## ⚙ 1. Setup Steps
+## 1. Setup Steps
 
 ### PostgreSQL
 ```sql
@@ -85,12 +85,13 @@ redis-cli ping   # PONG
 
 ---
 
-## 🖥 2. Spark Job
+##  2. Spark Job
 
 Run the pipeline:
 ```bash
 spark-submit --packages org.postgresql:postgresql:42.6.0 \
  spark_cdc_multi_sink.py
+
 ```
 
 ---
