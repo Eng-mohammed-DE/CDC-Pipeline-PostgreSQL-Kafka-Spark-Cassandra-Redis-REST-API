@@ -70,7 +70,7 @@ def process_enrich_and_write(batch_df, batch_id):
             send_to_rest_with_dlq(event_dict)  # This function already includes try-except and DLQ logic
 
     except Exception:
-        logger.exception("Batch processing failed")  # ⚠️ Protects the entire batch from crashing Spark
+        logger.exception("Batch processing failed")  #  Protects the entire batch from crashing Spark
 
 # ---------------------------
 # Windowed Aggregation → Redis
